@@ -1,0 +1,26 @@
+  // 新发现的渠道（2026-03-22）
+    MITCSAIL: {
+      url: 'https://www.csail.mit.edu/rss.xml',
+      enabled: true,
+      name: 'MIT CSAIL',
+    },
+    TechCrunchAI: {
+      url: 'https://techcrunch.com/category/artificial-intelligence/feed/',
+      enabled: true,
+      name: 'TechCrunch AI',
+    },
+    WiredAI: {
+      url: 'https://www.wired.com/feed/tag/ai/latest/rss',
+      enabled: true,
+      name: 'Wired AI',
+    },
+    ArsTechnicaAI: {
+      url: 'https://arstechnica.com/ai/feed/',
+      enabled: true,
+      name: 'Ars Technica AI',
+    },
+    量子位: {
+      url: 'https://www.qbitai.com/feed',
+      enabled: true,
+      name: '量子位',
+    }

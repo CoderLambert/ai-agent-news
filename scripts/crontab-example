@@ -1,0 +1,33 @@
+# AI Agent News Cron 定时任务配置
+#
+# 使用方法：
+# 1. 编辑 crontab: crontab -e
+# 2. 添加以下内容（根据实际情况调整路径）:
+#
+# 查看当前 crontab: crontab -l
+# 编辑 crontab: crontab -e
+# 移除所有任务：crontab -r
+
+# ============================================
+# 正式配置（已安装）
+# ============================================
+
+# 每小时执行一次
+# 在每小时的第 10 分钟执行抓取
+10 * * * * cd /home/lambert/ai-news && /usr/bin/env node src/fetch-news.js >> /home/lambert/ai-news/logs/cron.log 2>&1
+
+# 在每小时的第 15 分钟执行翻译
+15 * * * * cd /home/lambert/ai-news && /usr/bin/env node src/translate-news.js >> /home/lambert/ai-news/logs/cron.log 2>&1
+
+# 每周日上午 6 点探索新渠道
+0 6 * * 0 cd /home/lambert/ai-news && /usr/bin/env node src/discover-channels.js >> /home/lambert/ai-news/logs/discovery.log 2>&1
+
+# ============================================
+# 备选配置（根据需要启用）
+# ============================================
+
+# 测试配置（每分钟执行一次，仅用于测试）
+# * * * * * /home/lambert/ai-news/scripts/update-news.sh >> /home/lambert/ai-news/logs/cron.log 2>&1
+
+# 使用脚本方式执行（整合抓取和翻译）
+# 5 * * * * /home/lambert/ai-news/scripts/update-news.sh >> /home/lambert/ai-news/logs/cron.log 2>&1

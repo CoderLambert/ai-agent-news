@@ -1,0 +1,29 @@
+{
+  "name": "ai-news",
+  "version": "1.0.0",
+  "description": "AI Agent News Aggregator",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev docs",
+    "build": "vitepress build docs",
+    "preview": "vitepress preview docs",
+    "fetch-news": "node src/fetch-news.js",
+    "translate": "node src/translate-news.js",
+    "discover": "node src/discover-channels.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "news",
+    "aggregator"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "node-fetch": "^3.3.2",
+    "vitepress": "^1.6.4",
+    "vue": "^3.5.30",
+    "xml2js": "^0.6.2"
+  }
+}
