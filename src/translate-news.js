@@ -5,6 +5,11 @@
  *
  * 使用免费的翻译 API 将非中文新闻翻译为中文
  * 支持多种翻译服务（可配置）
+ *
+ * 稳定性特性：
+ * - 结构化日志记录
+ * - 请求失败重试
+ * - 速率限制保护
  */
 
 import * as fs from 'fs';
@@ -13,6 +18,45 @@ import * as https from 'https';
 import * as http from 'http';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
+
+// ==================== 日志系统 ====================
+const LOG_FILE = path.join(__dirname, '../logs/translate-news.log');
+
+function ensureLogDir() {
+  const logDir = path.dirname(LOG_FILE);
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+}
+
+function log(level, message, data = {}) {
+  const timestamp = new Date().toISOString();
+  const logLine = `[${timestamp}] [${level.toUpperCase()}] ${message}${Object.keys(data).length > 0 ? ' | ' + JSON.stringify(data) : ''}\n`;
+
+  // 控制台输出
+  if (level === 'error') {
+    console.error(logLine);
+  } else if (level === 'warn') {
+    console.warn(logLine);
+  } else {
+    console.log(logLine);
+  }
+
+  // 写入文件
+  try {
+    ensureLogDir();
+    fs.appendFileSync(LOG_FILE, logLine);
+  } catch (e) {
+    // 日志写入失败不影响主流程
+  }
+}
+
+const logger = {
+  info: (msg, data) => log('info', msg, data),
+  warn: (msg, data) => log('warn', msg, data),
+  error: (msg, data) => log('error', msg, data),
+  debug: (msg, data) => log('debug', msg, data),
+};
 
 // 配置
 const CONFIG = {
@@ -29,7 +73,31 @@ function containsChinese(text) {
   return chineseRegex.test(text);
 }
 
-// HTTP POST 请求
+// HTTP POST 请求（带重试）
+async function postRequestWithRetry(url, data, maxRetries = 3) {
+  const postData = JSON.stringify(data);
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // 指数退避
+      if (attempt > 1) {
+        const delay = Math.min(500 * Math.pow(2, attempt - 2), 4000);
+        logger.debug(`翻译重试前等待 ${delay}ms`, { url, attempt });
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+
+      return await postRequest(url, data);
+    } catch (error) {
+      lastError = error;
+      logger.warn(`翻译请求失败 (尝试 ${attempt}/${maxRetries})`, { url, error: error.message });
+    }
+  }
+
+  logger.error(`翻译请求所有重试失败`, { url, maxRetries });
+  throw lastError;
+}
+
 function postRequest(url, data) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
@@ -69,15 +137,16 @@ function postRequest(url, data) {
 // 使用 LibreTranslate 翻译
 async function translateWithLibre(text, sourceLang = 'en', targetLang = 'zh') {
   try {
-    const result = await postRequest(CONFIG.libreTranslateUrl, {
+    const result = await postRequestWithRetry(CONFIG.libreTranslateUrl, {
       q: text,
       source: sourceLang,
       target: targetLang,
       format: 'text',
     });
+    logger.debug('LibreTranslate 翻译成功', { originalLength: text.length });
     return result.translatedText || text;
   } catch (e) {
-    console.error(`LibreTranslate 翻译失败：${e.message}`);
+    logger.error(`LibreTranslate 翻译失败`, { error: e.message });
     return text;
   }
 }
@@ -129,7 +198,7 @@ async function translateText(text, sourceLang = 'en', targetLang = 'zh') {
 // 加载新闻数据
 function loadNews() {
   if (!fs.existsSync(CONFIG.dataFile)) {
-    console.error(`新闻数据文件不存在：${CONFIG.dataFile}`);
+    logger.error(`新闻数据文件不存在`, { path: CONFIG.dataFile });
     process.exit(1);
   }
 
@@ -144,11 +213,13 @@ function saveNews(news) {
 
 // 翻译新闻
 async function translateNews(force = false) {
-  console.log('🔄 开始翻译新闻...\n');
+  const startTime = Date.now();
+  logger.info('🔄 开始翻译新闻', { startTime: new Date().toISOString(), force });
 
   const news = loadNews();
   let translatedCount = 0;
   let skippedCount = 0;
+  let errorCount = 0;
 
   for (const item of news) {
     // 如果已经翻译过且不是强制模式，跳过
@@ -159,12 +230,12 @@ async function translateNews(force = false) {
 
     // 如果已经是中文，跳过
     if (containsChinese(item.title)) {
-      console.log(`⊘ 跳过（中文）：${item.title.substring(0, 40)}...`);
+      logger.debug(`跳过（中文）：${item.title.substring(0, 40)}...`);
       skippedCount++;
       continue;
     }
 
-    console.log(`📝 翻译：${item.title.substring(0, 40)}...`);
+    logger.debug(`翻译：${item.title.substring(0, 40)}...`);
 
     try {
       // 翻译标题
@@ -181,7 +252,7 @@ async function translateNews(force = false) {
       item.translatedAt = new Date().toISOString();
       translatedCount++;
 
-      console.log(`  ✅ "${translatedTitle.substring(0, 40)}..."`);
+      logger.debug(`✅ "${translatedTitle.substring(0, 40)}..."`);
 
       // 保存进度（每条翻译后保存，避免中断丢失）
       saveNews(news);
@@ -190,14 +261,19 @@ async function translateNews(force = false) {
       await sleep(500);
 
     } catch (e) {
-      console.error(`  ❌ 翻译失败：${e.message}`);
+      logger.error(`翻译失败`, { error: e.message, title: item.title?.substring(0, 40) });
+      errorCount++;
     }
   }
 
-  console.log(`\n✅ 翻译完成！`);
-  console.log(`   翻译：${translatedCount} 条`);
-  console.log(`   跳过：${skippedCount} 条`);
-  console.log(`   总计：${news.length} 条`);
+  const duration = Date.now() - startTime;
+  logger.info('✅ 翻译完成', {
+    translated: translatedCount,
+    skipped: skippedCount,
+    errors: errorCount,
+    total: news.length,
+    duration: `${duration}ms`,
+  });
 }
 
 // 延迟函数
@@ -208,8 +284,11 @@ function sleep(ms) {
 // 主函数
 async function main() {
   const force = process.argv.includes('--force');
-  await translateNews(force);
+  await translateNews(force).catch(e => {
+    logger.error('翻译脚本执行失败', { error: e.message });
+    process.exit(1);
+  });
 }
 
 // 运行
-main().catch(console.error);
+main();
