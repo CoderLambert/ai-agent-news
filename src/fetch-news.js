@@ -4,10 +4,15 @@
  * AI Agent 新闻抓取脚本
  *
  * 功能：
- * - 从多个来源抓取 AI Agent 相关新闻
+ * - 从多个来源抓取 AI Agent 相关资讯
  * - 提取标题、摘要、原文链接
  * - 自动分类新闻
  * - 生成结构化 JSON 数据
+ *
+ * 稳定性特性：
+ * - 指数退避重试机制
+ * - 结构化日志记录
+ * - API 限流保护
  */
 
 import * as fs from 'fs';
@@ -17,6 +22,52 @@ import * as http from 'http';
 import { parseStringPromise } from 'xml2js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
+
+// ==================== 日志系统 ====================
+const LOG_FILE = path.join(__dirname, '../logs/fetch-news.log');
+
+function ensureLogDir() {
+  const logDir = path.dirname(LOG_FILE);
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+}
+
+function log(level, message, data = {}) {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level,
+    message,
+    ...data,
+  };
+
+  const logLine = `[${timestamp}] [${level.toUpperCase()}] ${message}${Object.keys(data).length > 0 ? ' | ' + JSON.stringify(data) : ''}\n`;
+
+  // 控制台输出
+  if (level === 'error') {
+    console.error(logLine);
+  } else if (level === 'warn') {
+    console.warn(logLine);
+  } else {
+    console.log(logLine);
+  }
+
+  // 写入文件
+  try {
+    ensureLogDir();
+    fs.appendFileSync(LOG_FILE, logLine);
+  } catch (e) {
+    // 日志写入失败不影响主流程
+  }
+}
+
+const logger = {
+  info: (msg, data) => log('info', msg, data),
+  warn: (msg, data) => log('warn', msg, data),
+  error: (msg, data) => log('error', msg, data),
+  debug: (msg, data) => log('debug', msg, data),
+};
 
 // ==================== 分类配置 ====================
 const CATEGORIES = {
@@ -154,6 +205,41 @@ function ensureDir(dir) {
   }
 }
 
+/**
+ * 带指数退避重试机制的 HTTP 请求
+ * @param {string} url - 请求 URL
+ * @param {object} options - 请求选项
+ * @param {number} maxRetries - 最大重试次数
+ * @returns {Promise<any>} 请求结果
+ */
+async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+  const baseTimeout = options.timeout || 10000;
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // 指数退避：1s, 2s, 4s, 8s...
+      const delay = attempt > 1 ? Math.min(1000 * Math.pow(2, attempt - 2), 8000) : 0;
+      if (delay > 0) {
+        logger.debug(`重试前等待 ${delay}ms`, { url, attempt });
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+
+      return await fetch(url, { timeout: baseTimeout * attempt });
+    } catch (error) {
+      lastError = error;
+      logger.warn(`请求失败 (尝试 ${attempt}/${maxRetries})`, {
+        url,
+        error: error.message,
+        attempt,
+      });
+    }
+  }
+
+  logger.error(`所有重试均失败`, { url, maxRetries, finalError: lastError?.message });
+  throw lastError;
+}
+
 function fetch(url, options = {}) {
   const timeout = options.timeout || 10000;
 
@@ -212,9 +298,9 @@ function containsChinese(text) {
 
 // ==================== 抓取函数 ====================
 async function fetchHackerNews() {
-  console.log('📰 抓取 Hacker News...');
+  logger.info('📰 抓取 Hacker News...');
   try {
-    const topStories = await fetch(CONFIG.sources.hackerNews.url);
+    const topStories = await fetchWithRetry(CONFIG.sources.hackerNews.url, { timeout: 15000 }, 3);
     const news = [];
     const maxItems = CONFIG.maxPerSource || 20;
 
@@ -223,7 +309,7 @@ async function fetchHackerNews() {
 
       const id = topStories[i];
       try {
-        const item = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, { timeout: 5000 });
+        const item = await fetchWithRetry(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, { timeout: 8000 }, 2);
         if (item && item.type === 'story' && item.title) {
           const keywords = [
             'ai', 'agent', 'llm', 'gpt', 'claude', 'anthropic', 'openai',
@@ -253,26 +339,27 @@ async function fetchHackerNews() {
           }
         }
       } catch (e) {
-        // 跳过失败的请求
+        logger.debug(`跳过失败的 HN 条目`, { id, error: e.message });
       }
     }
 
-    console.log(`  获取 ${news.length} 条 Hacker News`);
+    logger.info(`Hacker News 抓取完成`, { count: news.length });
     return news;
   } catch (e) {
-    console.error('Error fetching Hacker News:', e.message);
+    logger.error('Hacker News 抓取失败', { error: e.message });
     return [];
   }
 }
 
 async function fetchReddit() {
-  console.log('📰 抓取 Reddit...');
+  logger.info('📰 抓取 Reddit...');
   const allNews = [];
+  const subredditStats = {};
 
   for (const subreddit of CONFIG.sources.reddit.subreddits) {
     try {
       const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=25`;
-      const data = await fetch(url);
+      const data = await fetchWithRetry(url, { timeout: 15000 }, 3);
 
       if (data && data.data && data.data.children) {
         const posts = data.data.children
@@ -296,12 +383,16 @@ async function fetchReddit() {
           });
 
         allNews.push(...posts);
+        subredditStats[subreddit] = posts.length;
+        logger.debug(`r/${subreddit} 抓取完成`, { count: posts.length });
       }
     } catch (e) {
-      console.error(`Error fetching r/${subreddit}:`, e.message);
+      logger.warn(`r/${subreddit} 抓取失败`, { error: e.message });
+      subredditStats[subreddit] = 0;
     }
   }
 
+  logger.info('Reddit 抓取完成', { total: allNews.length, subreddits: subredditStats });
   return allNews;
 }
 
@@ -372,6 +463,19 @@ async function parseRSS(xmlContent, sourceName) {
   }
 }
 
+/**
+ * 抓取单个 RSS 源（带重试机制）
+ * @param {object} source - RSS 源配置
+ * @returns {Promise<Array>} 新闻列表
+ */
+async function fetchSingleRSS(source) {
+  const url = source.url;
+  const sourceName = source.name || source;
+
+  const xmlContent = await fetchWithRetry(url, { timeout: 15000 }, 3);
+  return await parseRSS(xmlContent, sourceName);
+}
+
 async function fetchRSS() {
   console.log('📰 抓取 RSS 订阅源...');
   const allNews = [];
@@ -386,7 +490,7 @@ async function fetchRSS() {
       const sourceName = source.name || name;
       console.log(`  - ${sourceName}: ${url}`);
 
-      const xmlContent = await fetch(url);
+      const xmlContent = await fetchWithRetry(url, { timeout: 15000 }, 3);
       const items = await parseRSS(xmlContent, sourceName);
       allNews.push(...items);
       console.log(`    获取 ${items.length} 条`);
@@ -402,15 +506,15 @@ async function translateIfNeeded(news) {
   const newsToTranslate = news.filter(n => !containsChinese(n.title));
 
   if (newsToTranslate.length === 0) {
-    console.log('✅ 无需翻译');
+    logger.info('✅ 无需翻译');
     return news;
   }
 
-  console.log(`🔄 需要翻译 ${newsToTranslate.length} 条新闻...`);
+  logger.info(`🔄 需要翻译 ${newsToTranslate.length} 条新闻...`);
 
   for (const item of newsToTranslate) {
     item.translated = false;
-    console.log(`  - "${item.title.substring(0, 50)}..." [保留原文]`);
+    logger.debug(`待翻译：${item.title.substring(0, 50)}...`);
   }
 
   return news;
@@ -436,7 +540,7 @@ function saveNews(news) {
   ensureDir(CONFIG.outputDir);
   const outputPath = path.join(CONFIG.outputDir, CONFIG.outputFile);
   fs.writeFileSync(outputPath, JSON.stringify(news, null, 2), 'utf-8');
-  console.log(`✅ 已保存 ${news.length} 条新闻到 ${outputPath}`);
+  logger.info(`✅ 已保存 ${news.length} 条新闻到 ${outputPath}`);
 }
 
 function generateRSS(news) {
@@ -462,27 +566,61 @@ function generateRSS(news) {
 
   const rssPath = path.join(CONFIG.outputDir, 'feed.xml');
   fs.writeFileSync(rssPath, rss, 'utf-8');
-  console.log(`✅ RSS 订阅源已保存到 ${rssPath}`);
+  logger.info(`✅ RSS 订阅源已保存到 ${rssPath}`);
 }
 
 // ==================== 主函数 ====================
 async function main() {
-  console.log('🚀 开始抓取 AI Agent 新闻...\n');
+  const startTime = Date.now();
+  logger.info('🚀 开始抓取 AI Agent 新闻', { startTime: new Date().toISOString() });
 
   const allNews = [];
+  const sourceStats = {};
 
+  // 1. 抓取 Hacker News
   if (CONFIG.sources.hackerNews.enabled) {
-    const hnNews = await fetchHackerNews();
-    allNews.push(...hnNews);
+    try {
+      const hnNews = await fetchHackerNews();
+      allNews.push(...hnNews);
+      sourceStats['Hacker News'] = hnNews.length;
+    } catch (e) {
+      logger.error('Hacker News 抓取失败', { error: e.message });
+      sourceStats['Hacker News'] = 0;
+    }
   }
 
+  // 2. 抓取 Reddit
   if (CONFIG.sources.reddit.enabled) {
-    const redditNews = await fetchReddit();
-    allNews.push(...redditNews);
+    try {
+      const redditNews = await fetchReddit();
+      allNews.push(...redditNews);
+      sourceStats['Reddit'] = redditNews.length;
+    } catch (e) {
+      logger.error('Reddit 抓取失败', { error: e.message });
+      sourceStats['Reddit'] = 0;
+    }
   }
 
-  const rssNews = await fetchRSS();
-  allNews.push(...rssNews);
+  // 3. 抓取 RSS 源（排除 Hacker News 和 Reddit）
+  const rssSources = Object.entries(CONFIG.sources).filter(
+    ([key, source]) => source.url && source.enabled !== false && key !== 'hackerNews'
+  );
+
+  for (const [name, source] of rssSources) {
+    try {
+      const sourceName = source.name || name;
+      logger.info(`正在抓取 ${sourceName}`);
+      const rssItems = await fetchSingleRSS(source);
+      allNews.push(...rssItems);
+      sourceStats[sourceName] = rssItems.length;
+      logger.info(`${sourceName} 抓取完成`, { count: rssItems.length });
+    } catch (e) {
+      logger.error(`RSS 源抓取失败：${source.name || name}`, { error: e.message });
+      sourceStats[source.name || name] = 0;
+    }
+  }
+
+  logger.info('所有来源抓取完成', { sourceStats, totalBeforeDedupe: allNews.length });
 
   const processedNews = await translateIfNeeded(allNews);
   const finalNews = mergeAndDeduplicate(processedNews);
@@ -490,17 +628,22 @@ async function main() {
   saveNews(finalNews);
   generateRSS(finalNews);
 
-  console.log('\n✅ 新闻抓取完成！');
+  const duration = Date.now() - startTime;
+  logger.info('✅ 新闻抓取完成', {
+    totalNews: finalNews.length,
+    duration: `${duration}ms`,
+    sources: Object.keys(sourceStats).length,
+  });
 
   // 输出分类统计
   const stats = {};
   finalNews.forEach(news => {
     stats[news.categoryName] = (stats[news.categoryName] || 0) + 1;
   });
-  console.log('\n📊 分类统计:');
-  for (const [cat, count] of Object.entries(stats)) {
-    console.log(`  ${cat}: ${count}`);
-  }
+  logger.info('📊 分类统计', stats);
+
+  // 输出来源统计
+  logger.info('📊 来源统计', sourceStats);
 }
 
 main().catch(console.error);
