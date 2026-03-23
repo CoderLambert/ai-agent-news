@@ -20,6 +20,7 @@ export default defineConfig({
       { text: '首页', link: '/' },
       { text: '新闻列表', link: '/news/' },
       { text: '关于', link: '/about' },
+      { text: '开发日志', link: '/dev-log/' },
     ],
 
     sidebar: {
@@ -29,10 +30,16 @@ export default defineConfig({
           items: [],
         },
       ],
+      '/dev-log/': [
+        {
+          text: '开发日志',
+          items: [],
+        },
+      ],
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com' },
+      { icon: 'github', link: 'https://github.com/CoderLambert/ai-agent-news' },
     ],
 
     footer: {
